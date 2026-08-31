@@ -1,8 +1,4 @@
 streamlit
-fastapi
-uvicorn[standard]
-python-multipart
-requests
 psycopg2-binary
 PyJWT
 bcrypt

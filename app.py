@@ -40,8 +40,6 @@ sns.set_theme(style="white", rc={
     "axes.labelcolor": "#544E72", "xtick.color": "#544E72", "ytick.color": "#544E72",
 })
 
-BACKEND_URL = os.getenv("BACKEND_URL") or (st.secrets.get("BACKEND_URL") if hasattr(st, "secrets") and "BACKEND_URL" in st.secrets else "http://localhost:8000")
-
 MOOD_STYLE = {
     "Happy":   {"emoji": MOOD_EMOJI["Happy"],   "color": "#2ecc71"},
     "Neutral": {"emoji": MOOD_EMOJI["Neutral"], "color": "#3498db"},
@@ -689,21 +687,7 @@ if st.session_state.token:
                     else:
                         clean_text = sanitize_text(journal_text.strip())
                         with st.spinner("Running NLP analysis…"):
-                            r = None
-                            try:
-                                resp = requests.post(
-                                    f"{BACKEND_URL}/analyze-text",
-                                    json={"text": clean_text},
-                                    headers=headers, timeout=10,
-                                )
-                                if resp.status_code == 200:
-                                    r = resp.json()
-                            except Exception:
-                                r = None
-
-                            if r is None:
-                                # Direct in-process fallback when backend microservice isn't running
-                                r = process_employee_feedback(clean_text)
+                            r = process_employee_feedback(clean_text)
 
                         if r is not None:
                             confidence = r.get("emotion_confidence")
@@ -724,22 +708,17 @@ if st.session_state.token:
                 uploaded = st.file_uploader("Choose a CSV or TXT file", type=["csv", "txt"])
                 if uploaded is not None and st.button("Run NLP Analysis on file"):
                     with st.spinner("Running multilingual NLP pipeline…"):
-                        r = None
-                        files = {"file": (uploaded.name, uploaded.getvalue())}
-                        try:
-                            resp = requests.post(f"{BACKEND_URL}/analyze", files=files,
-                                                  headers=headers, timeout=10)
-                            if resp.status_code == 200:
-                                r = resp.json()
-                        except Exception:
-                            r = None
+                        content = uploaded.getvalue().decode("utf-8", errors="ignore")
+                        clean_blob = sanitize_text(content[:8000])
+                        r = process_employee_feedback(clean_blob)
 
-                        if r is None:
-                            # In-process fallback
-                            content = uploaded.getvalue().decode("utf-8", errors="ignore")
-                            clean_blob = sanitize_text(content[:8000])
-                            r = process_employee_feedback(clean_blob)
-
+                    if r is not None:
+                        confidence = r.get("emotion_confidence")
+                        save_mood_log(
+                            user["id"], r["final_sentiment"], r["final_emotion"],
+                            r["sentiment_scores"]["compound"], r.get("cleaned_text", ""),
+                            confidence=confidence,
+                        )
                     if r is not None:
                         confidence = r.get("emotion_confidence")
                         save_mood_log(
@@ -849,24 +828,10 @@ if st.session_state.token:
                     user_msg = sanitize_text(user_msg)
                     st.session_state.chat_history.append({"role": "user", "content": user_msg})
                     recent_history = st.session_state.chat_history[-10:-1]
-                    reply = None
                     try:
-                        resp = requests.post(
-                            f"{BACKEND_URL}/chat",
-                            json={"message": user_msg, "history": recent_history},
-                            headers=headers, timeout=10,
-                        )
-                        if resp.status_code == 200:
-                            reply = resp.json().get("reply")
+                        reply = wellness_chat_reply(user_msg, history=recent_history).get("reply")
                     except Exception:
-                        reply = None
-
-                    if not reply:
-                        # In-process fallback
-                        try:
-                            reply = wellness_chat_reply(user_msg, history=recent_history).get("reply")
-                        except Exception as e:
-                            reply = "I'm here and listening — could you tell me a bit more about how you're feeling?"
+                        reply = "I'm here and listening — could you tell me a bit more about how you're feeling?"
 
                     st.session_state.chat_history.append({"role": "assistant", "content": reply})
                     st.rerun()

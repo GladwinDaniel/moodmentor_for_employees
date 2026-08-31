@@ -1,14 +1,5 @@
 #Site Live at:
 https://moodmentorforemployees-jsmtrj27vkvgyxoujx6pnn.streamlit.app/
----
-title: MoodMentor
-emoji: 🧘
-colorFrom: indigo
-colorTo: purple
-sdk: streamlit
-app_file: app.py
-pinned: false
----
 
 # MoodMentor – AI-Powered Employee Wellness Platform
 

@@ -39,7 +39,7 @@ sns.set_theme(style="white", rc={
     "axes.labelcolor": "#544E72", "xtick.color": "#544E72", "ytick.color": "#544E72",
 })
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.getenv("BACKEND_URL") or (st.secrets.get("BACKEND_URL") if hasattr(st, "secrets") and "BACKEND_URL" in st.secrets else "http://localhost:8000")
 
 MOOD_STYLE = {
     "Happy":   {"emoji": MOOD_EMOJI["Happy"],   "color": "#2ecc71"},

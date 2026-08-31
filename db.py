@@ -4,13 +4,32 @@ from contextlib import contextmanager
 from dotenv import load_dotenv
 load_dotenv()
 
-CFG = dict(host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT", "5432"),
-           dbname=os.getenv("DB_NAME"), user=os.getenv("DB_USER"),
-           password=os.getenv("DB_PASSWORD"), sslmode="require")
+def get_env_or_secret(key: str, default=None):
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return default
+
+def get_cfg():
+    return dict(
+        host=get_env_or_secret("DB_HOST"),
+        port=get_env_or_secret("DB_PORT", "5432"),
+        dbname=get_env_or_secret("DB_NAME"),
+        user=get_env_or_secret("DB_USER"),
+        password=get_env_or_secret("DB_PASSWORD"),
+        sslmode="require"
+    )
 
 @contextmanager
 def cursor(commit=False):
-    conn = psycopg2.connect(**CFG)
+    cfg = get_cfg()
+    conn = psycopg2.connect(**cfg)
     cur = conn.cursor(cursor_factory=RealDictCursor)
     try:
         yield cur

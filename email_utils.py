@@ -3,9 +3,21 @@ from email.mime.text import MIMEText
 from dotenv import load_dotenv
 load_dotenv()
 
+def get_env_or_secret(key: str, default=""):
+    val = os.getenv(key)
+    if val:
+        return val
+    try:
+        import streamlit as st
+        if key in st.secrets:
+            return str(st.secrets[key])
+    except Exception:
+        pass
+    return default
+
 HOST, PORT = "smtp.gmail.com", 587
-EMAIL = os.getenv("SMTP_EMAIL")
-APP_PW = os.getenv("SMTP_APP_PASSWORD")
+EMAIL = get_env_or_secret("SMTP_EMAIL")
+APP_PW = get_env_or_secret("SMTP_APP_PASSWORD")
 
 def send_otp(to_email, code, purpose):
     subject = "Your Verification Code" if purpose == "signup" else "Your Password Reset Code"

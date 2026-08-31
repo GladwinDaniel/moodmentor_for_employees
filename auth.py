@@ -4,7 +4,19 @@ from dotenv import load_dotenv
 from db import cursor
 load_dotenv()
 
-SECRET = os.getenv("JWT_SECRET")
+def get_secret():
+    val = os.getenv("JWT_SECRET")
+    if val:
+        return val
+    try:
+        import streamlit as st
+        if "JWT_SECRET" in st.secrets:
+            return str(st.secrets["JWT_SECRET"])
+    except Exception:
+        pass
+    return "moodmentor_default_secret_key"
+
+SECRET = get_secret()
 
 MAX_LOGIN_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15

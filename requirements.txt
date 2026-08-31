@@ -1,0 +1,26 @@
+streamlit
+fastapi
+uvicorn[standard]
+python-multipart
+requests
+psycopg2-binary
+PyJWT
+bcrypt
+python-dotenv
+email-validator
+langdetect
+ftfy
+emoji
+deep-translator
+vaderSentiment
+spacy
+pandas
+matplotlib
+seaborn
+transformers
+accelerate
+stopwordsiso
+reportlab
+bleach
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch

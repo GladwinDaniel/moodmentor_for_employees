@@ -22,6 +22,7 @@ from auth import (make_token, read_token, get_user, username_taken, create_user,
                    MAX_LOGIN_ATTEMPTS, LOCKOUT_MINUTES, update_email)
 from email_utils import send_otp
 from security import sanitize_text
+from nlp_pipeline import process_employee_feedback, wellness_chat_reply
 
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
@@ -688,52 +689,27 @@ if st.session_state.token:
                     else:
                         clean_text = sanitize_text(journal_text.strip())
                         with st.spinner("Running NLP analysis…"):
+                            r = None
                             try:
                                 resp = requests.post(
                                     f"{BACKEND_URL}/analyze-text",
                                     json={"text": clean_text},
-                                    headers=headers, timeout=120,
+                                    headers=headers, timeout=10,
                                 )
-                            except requests.exceptions.RequestException as e:
-                                st.error(f"Could not reach backend: {e}"); resp = None
-                        if resp is not None:
-                            if resp.status_code != 200:
-                                st.error("Analysis failed.")
-                            else:
-                                r = resp.json()
-                                confidence = r.get("emotion_confidence")
-                                save_mood_log(
-                                    user["id"], r["final_sentiment"], r["final_emotion"],
-                                    r["sentiment_scores"]["compound"], clean_text,
-                                    confidence=confidence,
-                                )
-                                conf_str = f", Confidence: **{confidence:.0%}**" if confidence is not None else ""
-                                st.success(f"Saved! Sentiment: **{r['final_sentiment']}**, "
-                                           f"Emotion: **{r['final_emotion']}**{conf_str}")
-                                _fig = styled_bar_chart(r["emotion_scores"])
-                                if _fig: st.pyplot(_fig, use_container_width=True)
-                                if r.get("recommendation"):
-                                    st.info(f"**Recommendation:** {r['recommendation']}")
+                                if resp.status_code == 200:
+                                    r = resp.json()
+                            except Exception:
+                                r = None
 
-                st.subheader("Or upload a file")
-                uploaded = st.file_uploader("Choose a CSV or TXT file", type=["csv", "txt"])
-                if uploaded is not None and st.button("Run NLP Analysis on file"):
-                    files = {"file": (uploaded.name, uploaded.getvalue())}
-                    with st.spinner("Running multilingual NLP pipeline…"):
-                        try:
-                            resp = requests.post(f"{BACKEND_URL}/analyze", files=files,
-                                                  headers=headers, timeout=120)
-                        except requests.exceptions.RequestException as e:
-                            st.error(f"Could not reach backend: {e}"); resp = None
-                    if resp is not None:
-                        if resp.status_code != 200:
-                            st.error("Analysis failed.")
-                        else:
-                            r = resp.json()
+                            if r is None:
+                                # Direct in-process fallback when backend microservice isn't running
+                                r = process_employee_feedback(clean_text)
+
+                        if r is not None:
                             confidence = r.get("emotion_confidence")
                             save_mood_log(
                                 user["id"], r["final_sentiment"], r["final_emotion"],
-                                r["sentiment_scores"]["compound"], r.get("cleaned_text", ""),
+                                r["sentiment_scores"]["compound"], clean_text,
                                 confidence=confidence,
                             )
                             conf_str = f", Confidence: **{confidence:.0%}**" if confidence is not None else ""
@@ -743,6 +719,41 @@ if st.session_state.token:
                             if _fig: st.pyplot(_fig, use_container_width=True)
                             if r.get("recommendation"):
                                 st.info(f"**Recommendation:** {r['recommendation']}")
+
+                st.subheader("Or upload a file")
+                uploaded = st.file_uploader("Choose a CSV or TXT file", type=["csv", "txt"])
+                if uploaded is not None and st.button("Run NLP Analysis on file"):
+                    with st.spinner("Running multilingual NLP pipeline…"):
+                        r = None
+                        files = {"file": (uploaded.name, uploaded.getvalue())}
+                        try:
+                            resp = requests.post(f"{BACKEND_URL}/analyze", files=files,
+                                                  headers=headers, timeout=10)
+                            if resp.status_code == 200:
+                                r = resp.json()
+                        except Exception:
+                            r = None
+
+                        if r is None:
+                            # In-process fallback
+                            content = uploaded.getvalue().decode("utf-8", errors="ignore")
+                            clean_blob = sanitize_text(content[:8000])
+                            r = process_employee_feedback(clean_blob)
+
+                    if r is not None:
+                        confidence = r.get("emotion_confidence")
+                        save_mood_log(
+                            user["id"], r["final_sentiment"], r["final_emotion"],
+                            r["sentiment_scores"]["compound"], r.get("cleaned_text", ""),
+                            confidence=confidence,
+                        )
+                        conf_str = f", Confidence: **{confidence:.0%}**" if confidence is not None else ""
+                        st.success(f"Saved! Sentiment: **{r['final_sentiment']}**, "
+                                   f"Emotion: **{r['final_emotion']}**{conf_str}")
+                        _fig = styled_bar_chart(r["emotion_scores"])
+                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if r.get("recommendation"):
+                            st.info(f"**Recommendation:** {r['recommendation']}")
 
                 st.subheader(" Past entries")
                 history = [h for h in get_user_mood_history(user["id"], limit=20)
@@ -838,15 +849,25 @@ if st.session_state.token:
                     user_msg = sanitize_text(user_msg)
                     st.session_state.chat_history.append({"role": "user", "content": user_msg})
                     recent_history = st.session_state.chat_history[-10:-1]
+                    reply = None
                     try:
                         resp = requests.post(
                             f"{BACKEND_URL}/chat",
                             json={"message": user_msg, "history": recent_history},
-                            headers=headers, timeout=60,
+                            headers=headers, timeout=10,
                         )
-                        reply = resp.json()["reply"] if resp.status_code == 200 else                            "Sorry, I couldn't reach the wellness assistant right now."
-                    except requests.exceptions.RequestException:
-                        reply = "Sorry, I couldn't reach the wellness assistant right now."
+                        if resp.status_code == 200:
+                            reply = resp.json().get("reply")
+                    except Exception:
+                        reply = None
+
+                    if not reply:
+                        # In-process fallback
+                        try:
+                            reply = wellness_chat_reply(user_msg, history=recent_history).get("reply")
+                        except Exception as e:
+                            reply = "I'm here and listening — could you tell me a bit more about how you're feeling?"
+
                     st.session_state.chat_history.append({"role": "assistant", "content": reply})
                     st.rerun()
 

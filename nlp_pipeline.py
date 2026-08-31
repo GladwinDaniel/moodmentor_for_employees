@@ -64,7 +64,17 @@ GOEMOTIONS_TO_APP_LABEL = {
 def _get_nlp():
     global _nlp
     if _nlp is None:
-        _nlp = spacy.load("xx_sent_ud_sm")
+        try:
+            _nlp = spacy.load("xx_sent_ud_sm")
+        except Exception:
+            try:
+                import subprocess
+                subprocess.run(["python", "-m", "spacy", "download", "xx_sent_ud_sm"], check=True)
+                _nlp = spacy.load("xx_sent_ud_sm")
+            except Exception:
+                _nlp = spacy.blank("en")
+                if "sentencizer" not in _nlp.pipe_names:
+                    _nlp.add_pipe("sentencizer")
     return _nlp
 
 def _get_vader():

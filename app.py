@@ -1390,15 +1390,17 @@ if st.session_state.page == "welcome":
                 elif username_taken(username) or get_user(email):
                     st.error("Username or email already in use.")
                 else:
-                    create_user(username, email, pw, role=role)
-                    code = new_otp(); save_otp(email, code, "signup")
+                    code = new_otp()
                     ok, msg = send_otp(email, code, "signup")
                     if ok:
+                        create_user(username, email, pw, role=role)
+                        save_otp(email, code, "signup")
                         st.session_state.email = email
-                        st.success("Check your email for the code.")
+                        st.success("✅ Check your email for the verification code.")
                         goto_auth("verify")
                     else:
-                        st.error(f"Email failed: {msg}")
+                        st.error(f"⚠️ Could not send OTP email. Error: {msg}")
+                        st.info("💡 Tip: Make sure SMTP_EMAIL and SMTP_APP_PASSWORD are correctly set in Streamlit Secrets.")
             if st.button("Already have an account? Login"): goto_auth("login")
 
         elif mode == "verify":

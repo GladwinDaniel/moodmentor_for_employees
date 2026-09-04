@@ -14,7 +14,7 @@ def get_secret():
             return str(st.secrets["JWT_SECRET"])
     except Exception:
         pass
-    return "moodmentor_default_secret_key"
+    return "moodmentor_default_secret_key_change_me_in_production_32b"
 
 SECRET = get_secret()
 

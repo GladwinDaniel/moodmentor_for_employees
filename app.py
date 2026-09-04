@@ -1,5 +1,5 @@
 import os, re, io, base64, calendar
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import requests, streamlit as st
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -27,7 +27,7 @@ from nlp_pipeline import process_employee_feedback, wellness_chat_reply
 IST_OFFSET = timedelta(hours=5, minutes=30)
 
 def now_ist():
-    return datetime.utcnow() + IST_OFFSET
+    return datetime.now(timezone.utc) + IST_OFFSET
 
 def today_ist():
     return now_ist().date()

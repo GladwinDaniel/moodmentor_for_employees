@@ -1,3 +1,4 @@
+import os
 import re
 import ftfy
 import emoji
@@ -13,6 +14,8 @@ from langdetect import detect, DetectorFactory
 from deep_translator import GoogleTranslator
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from recommendations import get_recommendation, WELLNESS_RECOMMENDATIONS
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from huggingface_hub import InferenceClient
 
 DetectorFactory.seed = 0
 
@@ -23,6 +26,7 @@ _qwen_tokenizer = None
 _bert_emotion_pipeline = None
 
 QWEN_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+LOCAL_TIMEOUT_SECONDS = 5
 
 BERT_EMOTION_MODEL_NAME = "bhadresh-savani/bert-base-go-emotion"
 
@@ -239,24 +243,13 @@ def _contains_crisis_language(text: str) -> bool:
     lowered = text.lower()
     return any(kw in lowered for kw in CRISIS_KEYWORDS)
 
-def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict:
-
-    if _contains_crisis_language(message):
-        return {"reply": CRISIS_MESSAGE, "flagged": True}
-
+def _local_qwen_generate(messages: list[dict]) -> str:
+    """Run Qwen locally and return the reply text."""
     model, tokenizer = _get_qwen()
-
-    messages = [{"role": "system", "content": WELLNESS_SYSTEM_PROMPT}]
-    for turn in (history or []):
-        if turn.get("role") in ("user", "assistant") and turn.get("content"):
-            messages.append({"role": turn["role"], "content": turn["content"]})
-    messages.append({"role": "user", "content": message})
-
     prompt = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
@@ -265,11 +258,58 @@ def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict
             do_sample=True,
             top_p=0.9,
         )
-
     generated = output_ids[0][inputs["input_ids"].shape[1]:]
-    reply = tokenizer.decode(generated, skip_special_tokens=True).strip()
+    return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-    if not reply:
-        reply = "I'm here and listening — could you tell me a bit more about how you're feeling?"
 
-    return {"reply": reply, "flagged": False}
+def _qwen_api_reply(messages: list[dict]) -> str:
+    """Call the HuggingFace Inference API as a fast fallback."""
+    hf_token = os.environ.get("HF_TOKEN", "")
+    client = InferenceClient(
+        model=QWEN_MODEL_NAME,
+        token=hf_token or None,
+    )
+    response = client.chat_completion(
+        messages=messages,
+        max_tokens=150,
+        temperature=0.7,
+        top_p=0.9,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict:
+
+    if _contains_crisis_language(message):
+        return {"reply": CRISIS_MESSAGE, "flagged": True}
+
+    messages = [{"role": "system", "content": WELLNESS_SYSTEM_PROMPT}]
+    for turn in (history or []):
+        if turn.get("role") in ("user", "assistant") and turn.get("content"):
+            messages.append({"role": turn["role"], "content": turn["content"]})
+    messages.append({"role": "user", "content": message})
+
+    # --- Try local Qwen with a 5-second timeout ---
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_local_qwen_generate, messages)
+            reply = future.result(timeout=LOCAL_TIMEOUT_SECONDS)
+            if reply:
+                return {"reply": reply, "flagged": False}
+    except FuturesTimeoutError:
+        pass  # local model too slow → fall back to API
+    except Exception:
+        pass  # local model errored → fall back to API
+
+    # --- Fallback: HuggingFace Inference API ---
+    try:
+        reply = _qwen_api_reply(messages)
+        if reply:
+            return {"reply": reply, "flagged": False}
+    except Exception:
+        pass
+
+    return {
+        "reply": "I'm here and listening — could you tell me a bit more about how you're feeling?",
+        "flagged": False,
+    }

@@ -6,28 +6,28 @@ import spacy
 import torch
 import stopwordsiso
 from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
     pipeline as hf_pipeline,
 )
 from langdetect import detect, DetectorFactory
 from deep_translator import GoogleTranslator
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from recommendations import get_recommendation, WELLNESS_RECOMMENDATIONS
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from huggingface_hub import InferenceClient
+
+# Restrict PyTorch CPU threads to 1 to avoid saturating shared container CPU quota
+torch.set_num_threads(1)
+
+# Streamlit-compatible resource cache decorator (falls back gracefully if run outside Streamlit)
+try:
+    import streamlit as st
+    cache_resource = st.cache_resource
+except Exception:
+    def cache_resource(fn):
+        return fn
 
 DetectorFactory.seed = 0
 
-_nlp = None
-_vader = None
-_qwen_model = None
-_qwen_tokenizer = None
-_bert_emotion_pipeline = None
-
 QWEN_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-LOCAL_TIMEOUT_SECONDS = 5
-
 BERT_EMOTION_MODEL_NAME = "bhadresh-savani/bert-base-go-emotion"
 
 LANGUAGE_NAMES = {
@@ -65,49 +65,34 @@ GOEMOTIONS_TO_APP_LABEL = {
     "curiosity": "Neutral", "desire": "Neutral",
 }
 
+@cache_resource
 def _get_nlp():
-    global _nlp
-    if _nlp is None:
-        try:
-            _nlp = spacy.load("xx_sent_ud_sm")
-        except Exception:
-            try:
-                import subprocess
-                subprocess.run(["python", "-m", "spacy", "download", "xx_sent_ud_sm"], check=True)
-                _nlp = spacy.load("xx_sent_ud_sm")
-            except Exception:
-                _nlp = spacy.blank("en")
-                if "sentencizer" not in _nlp.pipe_names:
-                    _nlp.add_pipe("sentencizer")
-    return _nlp
+    """Fast, lightweight sentence tokenizer using spaCy blank model (~15MB RAM)."""
+    nlp = spacy.blank("en")
+    if "sentencizer" not in nlp.pipe_names:
+        nlp.add_pipe("sentencizer")
+    return nlp
 
+@cache_resource
 def _get_vader():
-    global _vader
-    if _vader is None:
-        _vader = SentimentIntensityAnalyzer()
-    return _vader
+    return SentimentIntensityAnalyzer()
 
-def _get_qwen():
-    global _qwen_model, _qwen_tokenizer
-    if _qwen_model is None:
-        _qwen_tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_NAME)
-        _qwen_model = AutoModelForCausalLM.from_pretrained(
-            QWEN_MODEL_NAME,
-            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-            device_map="auto" if torch.cuda.is_available() else None,
-        )
-    return _qwen_model, _qwen_tokenizer
-
+@cache_resource
 def _get_bert_emotion_pipeline():
-    global _bert_emotion_pipeline
-    if _bert_emotion_pipeline is None:
-        _bert_emotion_pipeline = hf_pipeline(
-            "text-classification",
-            model=BERT_EMOTION_MODEL_NAME,
-            top_k=None,
-            device=0 if torch.cuda.is_available() else -1,
+    """Load BERT emotion classifier with PyTorch dynamic 8-bit quantization to cut memory by ~50%."""
+    pipe = hf_pipeline(
+        "text-classification",
+        model=BERT_EMOTION_MODEL_NAME,
+        top_k=None,
+        device=-1,
+    )
+    try:
+        pipe.model = torch.quantization.quantize_dynamic(
+            pipe.model, {torch.nn.Linear}, dtype=torch.qint8
         )
-    return _bert_emotion_pipeline
+    except Exception as e:
+        print(f"[BERT] Dynamic quantization skipped: {e}")
+    return pipe
 
 def _bert_emotion(text: str) -> dict:
     classifier = _get_bert_emotion_pipeline()
@@ -162,13 +147,16 @@ def process_employee_feedback(text: str) -> dict:
     filtered_tokens = [t for t in clean_tokens if t.lower() not in selected_stopwords]
     final_preprocessed_text = " ".join(filtered_tokens)
 
-    try:
-        translated_text = GoogleTranslator(source="auto", target="en").translate(final_preprocessed_text)
-    except Exception as error:
-        translated_text = f"Translation failed: {error}"
+    if language and language not in ("en", "unknown") and final_preprocessed_text.strip():
+        try:
+            translated_text = GoogleTranslator(source="auto", target="en").translate(final_preprocessed_text)
+        except Exception as error:
+            translated_text = final_preprocessed_text
+    else:
+        translated_text = final_preprocessed_text
 
     english_doc = nlp(translated_text)
-    lemmas = [t.lemma_ if t.lemma_ else t.text for t in english_doc if not t.is_space]
+    lemmas = [t.lemma_ if hasattr(t, "lemma_") and t.lemma_ else t.text for t in english_doc if not t.is_space]
     lemmatized_text = " ".join(lemmas)
 
     sentiment_scores = vader.polarity_scores(translated_text)
@@ -243,28 +231,40 @@ def _contains_crisis_language(text: str) -> bool:
     lowered = text.lower()
     return any(kw in lowered for kw in CRISIS_KEYWORDS)
 
-def _local_qwen_generate(messages: list[dict]) -> str:
-    """Run Qwen locally and return the reply text."""
-    model, tokenizer = _get_qwen()
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=150,
-            temperature=0.7,
-            do_sample=True,
-            top_p=0.9,
+def _generate_wellness_fallback(user_text: str) -> str:
+    """Generate supportive context-aware responses if offline or API is unavailable."""
+    user_lower = user_text.lower()
+    if any(w in user_lower for w in ["sad", "depressed", "down", "unhappy", "cry", "lonely"]):
+        return (
+            "I hear you, and it's completely okay to have days where things feel heavy. "
+            "Take a slow breath and remember you don't have to carry it all at once. "
+            "What's one small thing that might bring you a moment of comfort right now?"
         )
-    generated = output_ids[0][inputs["input_ids"].shape[1]:]
-    return tokenizer.decode(generated, skip_special_tokens=True).strip()
-
+    elif any(w in user_lower for w in ["stress", "anxious", "overwhelm", "pressure", "burnout", "tired", "exhaust"]):
+        return (
+            "It sounds like you've been carrying a heavy workload or pressure lately. "
+            "Please consider pausing for just a minute to step away from your screen or do a quick 4-7-8 breathing exercise. "
+            "Would you like to talk through what feels most urgent?"
+        )
+    elif any(w in user_lower for w in ["angry", "frustrat", "annoy", "mad", "irritat"]):
+        return (
+            "That sounds really frustrating, and your feelings are completely valid. "
+            "It can help to take a short walk or write down your thoughts before responding to the situation. "
+            "I'm right here if you want to vent."
+        )
+    elif any(w in user_lower for w in ["happy", "great", "good", "excit", "awesome", "proud", "relie"]):
+        return (
+            "I'm so glad to hear that! Celebrating these positive moments and recognizing what went well is great for your well-being. "
+            "What made today feel especially good?"
+        )
+    else:
+        return (
+            "Thank you for sharing that with me. I'm here to listen and support you. "
+            "How has this been affecting your energy and peace of mind today?"
+        )
 
 def _get_hf_token() -> str:
     """Get HF token from Streamlit secrets or environment."""
-    # Streamlit Cloud stores secrets via st.secrets, not os.environ
     try:
         import streamlit as st
         token = st.secrets.get("HF_TOKEN", "")
@@ -274,14 +274,13 @@ def _get_hf_token() -> str:
         pass
     return os.environ.get("HF_TOKEN", "")
 
-
 def _qwen_api_reply(messages: list[dict]) -> str:
-    """Call the HuggingFace Inference API as a fast fallback."""
+    """Call the HuggingFace Inference API with a 10-second timeout."""
     hf_token = _get_hf_token()
-    print(f"[WellnessChat] API fallback triggered, token present: {bool(hf_token)}")
     client = InferenceClient(
         model=QWEN_MODEL_NAME,
         token=hf_token or None,
+        timeout=10,
     )
     response = client.chat_completion(
         messages=messages,
@@ -290,12 +289,9 @@ def _qwen_api_reply(messages: list[dict]) -> str:
         top_p=0.9,
     )
     reply = response.choices[0].message.content.strip()
-    print(f"[WellnessChat] API reply received ({len(reply)} chars)")
     return reply
 
-
 def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict:
-
     if _contains_crisis_language(message):
         return {"reply": CRISIS_MESSAGE, "flagged": True}
 
@@ -305,29 +301,17 @@ def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict
             messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": message})
 
-    # --- Try local Qwen with a 5-second timeout ---
-    try:
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_local_qwen_generate, messages)
-            reply = future.result(timeout=LOCAL_TIMEOUT_SECONDS)
-            if reply:
-                print("[WellnessChat] Local model replied in time")
-                return {"reply": reply, "flagged": False}
-    except FuturesTimeoutError:
-        print("[WellnessChat] Local model timed out, switching to API")
-    except Exception as e:
-        print(f"[WellnessChat] Local model error: {e}")
-
-    # --- Fallback: HuggingFace Inference API ---
+    # 1. Primary: Hugging Face Serverless Inference API (0 MB local RAM, 0% CPU saturation)
     try:
         reply = _qwen_api_reply(messages)
         if reply:
             return {"reply": reply, "flagged": False}
     except Exception as e:
-        print(f"[WellnessChat] API error: {e}")
+        print(f"[WellnessChat] API note: {e}")
 
+    # 2. Fast, empathetic fallback (instant response, zero crashes or timeouts)
     return {
-        "reply": "I'm here and listening — could you tell me a bit more about how you're feeling?",
+        "reply": _generate_wellness_fallback(message),
         "flagged": False,
     }
 

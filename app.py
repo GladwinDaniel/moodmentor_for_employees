@@ -266,6 +266,12 @@ def styled_line_chart(data: dict, figsize=(5.8, 3.1)):
     fig.tight_layout()
     return fig
 
+def render_plot(fig, use_container_width=True):
+    """Render a Matplotlib figure in Streamlit and immediately free memory."""
+    if fig is not None:
+        st.pyplot(fig, use_container_width=use_container_width, clear_figure=True)
+        plt.close(fig)
+
 def metric_tile(label, value, sub=None):
     st.metric(label, value, delta=sub, delta_color="off")
 
@@ -492,6 +498,28 @@ inject_css()
 def setup(): init_db()
 setup()
 
+@st.cache_data(ttl=20, show_spinner=False)
+def get_cached_user_mood_history(user_id: int, limit: int = 500):
+    return get_user_mood_history(user_id, limit=limit)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_cached_all_employee_mood_logs(days: int = 30):
+    return get_all_employee_mood_logs(days=days)
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_cached_latest_mood_per_employee():
+    return get_latest_mood_per_employee()
+
+@st.cache_data(ttl=30, show_spinner=False)
+def get_cached_all_questionnaire_responses():
+    return get_all_questionnaire_responses()
+
+def invalidate_mood_cache():
+    get_cached_user_mood_history.clear()
+    get_cached_all_employee_mood_logs.clear()
+    get_cached_latest_mood_per_employee.clear()
+    get_cached_all_questionnaire_responses.clear()
+
 if "page" not in st.session_state: st.session_state.page = "welcome"
 if "show_auth_panel" not in st.session_state: st.session_state.show_auth_panel = False
 if "auth_mode" not in st.session_state: st.session_state.auth_mode = "login"
@@ -570,7 +598,7 @@ if st.session_state.token:
             section = st.session_state.nav
 
             if section == "Home":
-                history_all = get_user_mood_history(user["id"], limit=500)
+                history_all = get_cached_user_mood_history(user["id"], limit=500)
                 latest = history_all[0] if history_all else None
                 today_count = sum(1 for h in history_all if h["mood_date"] == today_ist())
                 streak = 0
@@ -598,7 +626,7 @@ if st.session_state.token:
                     metric_tile("Current Streak", f"{streak} Days")
 
                 st.write("")
-                st.subheader("How Do You Feel?")
+                st.subheader("How are you feeling right now?")
                 now = now_ist()
                 st.caption(f"{now.strftime('%Y-%m-%d')}  {now.strftime('%H:%M')}")
 
@@ -621,6 +649,7 @@ if st.session_state.token:
                     if st.button("Save mood", type="primary", disabled=disabled,
                                  use_container_width=True):
                         save_manual_mood(user["id"], st.session_state.picked_mood)
+                        invalidate_mood_cache()
                         st.session_state.today_mood_saved = True
                         st.session_state.picked_mood = None
                         st.rerun()
@@ -696,11 +725,12 @@ if st.session_state.token:
                                 r["sentiment_scores"]["compound"], clean_text,
                                 confidence=confidence,
                             )
+                            invalidate_mood_cache()
                             conf_str = f", Confidence: **{confidence:.0%}**" if confidence is not None else ""
                             st.success(f"Saved! Sentiment: **{r['final_sentiment']}**, "
                                        f"Emotion: **{r['final_emotion']}**{conf_str}")
                             _fig = styled_bar_chart(r["emotion_scores"])
-                            if _fig: st.pyplot(_fig, use_container_width=True)
+                            if _fig: render_plot(_fig, use_container_width=True)
                             if r.get("recommendation"):
                                 st.info(f"**Recommendation:** {r['recommendation']}")
 
@@ -719,18 +749,12 @@ if st.session_state.token:
                             r["sentiment_scores"]["compound"], r.get("cleaned_text", ""),
                             confidence=confidence,
                         )
-                    if r is not None:
-                        confidence = r.get("emotion_confidence")
-                        save_mood_log(
-                            user["id"], r["final_sentiment"], r["final_emotion"],
-                            r["sentiment_scores"]["compound"], r.get("cleaned_text", ""),
-                            confidence=confidence,
-                        )
+                        invalidate_mood_cache()
                         conf_str = f", Confidence: **{confidence:.0%}**" if confidence is not None else ""
                         st.success(f"Saved! Sentiment: **{r['final_sentiment']}**, "
                                    f"Emotion: **{r['final_emotion']}**{conf_str}")
                         _fig = styled_bar_chart(r["emotion_scores"])
-                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if _fig: render_plot(_fig, use_container_width=True)
                         if r.get("recommendation"):
                             st.info(f"**Recommendation:** {r['recommendation']}")
 
@@ -767,6 +791,7 @@ if st.session_state.token:
                     save_questionnaire_response(
                         user["id"], answers, result["total_score"], result["category"],
                     )
+                    invalidate_mood_cache()
                     rec = get_questionnaire_recommendation(
                         result["category"],
                         support_pref=answers.get("q7_support_pref"),
@@ -841,7 +866,7 @@ if st.session_state.token:
                     st.rerun()
 
             elif section == "Dashboard":
-                history = get_user_mood_history(user["id"], limit=200)
+                history = get_cached_user_mood_history(user["id"], limit=200)
                 if not history:
                     st.info("No entries yet — pick a mood on Home or write a journal entry to see your dashboard.")
                 else:
@@ -854,10 +879,10 @@ if st.session_state.token:
                     with c1:
                         st.write("**Mood distribution**")
                         fig = donut_chart(counts)
-                        if fig: st.pyplot(fig, use_container_width=False)
+                        if fig: render_plot(fig, use_container_width=False)
                         else:
                             _fig = styled_bar_chart(counts)
-                            if _fig: st.pyplot(_fig, use_container_width=True)
+                            if _fig: render_plot(_fig, use_container_width=True)
                     with c2:
                         st.write("**Mood trend over time**")
                         by_date = {}
@@ -866,7 +891,7 @@ if st.session_state.token:
                             by_date.setdefault(d, []).append(MOOD_TO_NUM.get(h["sentiment"], 0))
                         trend = {str(d): sum(v) / len(v) for d, v in sorted(by_date.items())}
                         _fig = styled_line_chart(trend)
-                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if _fig: render_plot(_fig, use_container_width=True)
 
                     st.write("**Emotions detected from journal entries**")
                     emo_counts = {}
@@ -875,7 +900,7 @@ if st.session_state.token:
                             emo_counts[h["emotion"]] = emo_counts.get(h["emotion"], 0) + 1
                     if emo_counts:
                         _fig = styled_bar_chart(emo_counts)
-                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if _fig: render_plot(_fig, use_container_width=True)
                     else:
                         st.caption("No journal-based emotion data yet.")
 
@@ -1010,6 +1035,7 @@ if st.session_state.token:
 
                         if st.button("Log this Mood", key="log_face"):
                             save_mood_log(user["id"], detected_emotion, detected_emotion, 0.0, "Face scan recorded", confidence=confidence)
+                            invalidate_mood_cache()
                             st.success("Saved to your journal!")
                     else:
                         st.caption("Awaiting face scan input...")
@@ -1062,6 +1088,7 @@ if st.session_state.token:
 
                         if st.button("Log Voice Mood"):
                             save_mood_log(user["id"], "Neutral", detected_tone, 0.0, f"Voice analysis: {detected_tone} (Stress: {stress_level})", confidence=0.85)
+                            invalidate_mood_cache()
                             st.success("Voice mood logged!")
                     else:
                         st.caption("Awaiting audio input...")
@@ -1090,6 +1117,7 @@ if st.session_state.token:
                             st.session_state.focus_start_time = datetime.now()
                             st.session_state.focus_start_mood = start_mood
                             save_manual_mood(user["id"], start_mood)
+                            invalidate_mood_cache()
                             st.rerun()
 
                     elif st.session_state.focus_state == "running":
@@ -1118,6 +1146,7 @@ if st.session_state.token:
                         if st.button("Log Completion", type="primary"):
                             journal_entry = f"Completed a {total_mins} min focus session. Mood changed from {st.session_state.focus_start_mood} to {end_mood}."
                             save_mood_log(user["id"], end_mood, end_mood, 0.0, journal_entry, confidence=1.0)
+                            invalidate_mood_cache()
                             st.session_state.focus_post_mood = end_mood
                             st.session_state.focus_state = "recommendation"
                             st.rerun()
@@ -1189,8 +1218,8 @@ if st.session_state.token:
                     "is identified unless you explicitly turn on names below."
                 )
 
-                history = get_all_employee_mood_logs(limit_days=30)
-                qn_rows = get_all_questionnaire_responses(limit_days=30)
+                history = get_cached_all_employee_mood_logs(days=30)
+                qn_rows = get_cached_all_questionnaire_responses()
 
                 st.write("**Team recommendation**")
                 team_rec = get_team_recommendation(history, qn_rows)
@@ -1218,17 +1247,17 @@ if st.session_state.token:
                     if history:
                         mood_counts = {label: stats["mood_counts"].get(label, 0) for label in MOOD_LABELS}
                         fig = donut_chart(mood_counts)
-                        if fig: st.pyplot(fig, use_container_width=False)
+                        if fig: render_plot(fig, use_container_width=False)
                         else:
                             _fig = styled_bar_chart(mood_counts)
-                            if _fig: st.pyplot(_fig, use_container_width=True)
+                            if _fig: render_plot(_fig, use_container_width=True)
                     else:
                         st.caption("No mood data yet.")
                 with v2:
                     st.write("**Check-in outcomes (questionnaire)**")
                     if stats["category_counts"]:
                         _fig = styled_bar_chart(stats["category_counts"])
-                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if _fig: render_plot(_fig, use_container_width=True)
                     else:
                         st.caption("No questionnaire data yet.")
 
@@ -1237,21 +1266,21 @@ if st.session_state.token:
                     st.write("**Top factors affecting mood**")
                     if stats["factor_counts"]:
                         _fig = styled_bar_chart(stats["factor_counts"])
-                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if _fig: render_plot(_fig, use_container_width=True)
                     else:
                         st.caption("No questionnaire data yet.")
                 with v4:
                     st.write("**Preferred support types**")
                     if stats["support_counts"]:
                         _fig = styled_bar_chart(stats["support_counts"])
-                        if _fig: st.pyplot(_fig, use_container_width=True)
+                        if _fig: render_plot(_fig, use_container_width=True)
                     else:
                         st.caption("No questionnaire data yet.")
 
                 if stats["emotion_counts"]:
                     st.write("**Emotions detected from journal entries (team-wide)**")
                     _fig = styled_bar_chart(stats["emotion_counts"])
-                    if _fig: st.pyplot(_fig, use_container_width=True)
+                    if _fig: render_plot(_fig, use_container_width=True)
 
                 st.write("**Team mood trend, all employees consolidated (last 30 days)**")
                 if not history:
@@ -1263,7 +1292,7 @@ if st.session_state.token:
                         by_date.setdefault(d, []).append(MOOD_TO_NUM.get(row["sentiment"], 0))
                     trend = {str(d): sum(v) / len(v) for d, v in sorted(by_date.items())}
                     _fig = styled_line_chart(trend)
-                    if _fig: st.pyplot(_fig, use_container_width=True)
+                    if _fig: render_plot(_fig, use_container_width=True)
                     st.caption("Average mood score per day across all employees "
                                "(2 = Happy, 0 = Neutral, -1 = Sad/Stress, -2 = Angry/Fear)")
 

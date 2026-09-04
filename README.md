@@ -1,5 +1,5 @@
 #Site Live at:
-https://moodmentorforemployees-jsmtrj27vkvgyxoujx6pnn.streamlit.app/
+https://moodmentorforemployees.streamlit.app/
 
 # MoodMentor – AI-Powered Employee Wellness Platform
 

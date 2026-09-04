@@ -262,9 +262,23 @@ def _local_qwen_generate(messages: list[dict]) -> str:
     return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
+def _get_hf_token() -> str:
+    """Get HF token from Streamlit secrets or environment."""
+    # Streamlit Cloud stores secrets via st.secrets, not os.environ
+    try:
+        import streamlit as st
+        token = st.secrets.get("HF_TOKEN", "")
+        if token:
+            return token
+    except Exception:
+        pass
+    return os.environ.get("HF_TOKEN", "")
+
+
 def _qwen_api_reply(messages: list[dict]) -> str:
     """Call the HuggingFace Inference API as a fast fallback."""
-    hf_token = os.environ.get("HF_TOKEN", "")
+    hf_token = _get_hf_token()
+    print(f"[WellnessChat] API fallback triggered, token present: {bool(hf_token)}")
     client = InferenceClient(
         model=QWEN_MODEL_NAME,
         token=hf_token or None,
@@ -275,7 +289,9 @@ def _qwen_api_reply(messages: list[dict]) -> str:
         temperature=0.7,
         top_p=0.9,
     )
-    return response.choices[0].message.content.strip()
+    reply = response.choices[0].message.content.strip()
+    print(f"[WellnessChat] API reply received ({len(reply)} chars)")
+    return reply
 
 
 def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict:
@@ -295,21 +311,23 @@ def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict
             future = executor.submit(_local_qwen_generate, messages)
             reply = future.result(timeout=LOCAL_TIMEOUT_SECONDS)
             if reply:
+                print("[WellnessChat] Local model replied in time")
                 return {"reply": reply, "flagged": False}
     except FuturesTimeoutError:
-        pass  # local model too slow → fall back to API
-    except Exception:
-        pass  # local model errored → fall back to API
+        print("[WellnessChat] Local model timed out, switching to API")
+    except Exception as e:
+        print(f"[WellnessChat] Local model error: {e}")
 
     # --- Fallback: HuggingFace Inference API ---
     try:
         reply = _qwen_api_reply(messages)
         if reply:
             return {"reply": reply, "flagged": False}
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WellnessChat] API error: {e}")
 
     return {
         "reply": "I'm here and listening — could you tell me a bit more about how you're feeling?",
         "flagged": False,
     }
+

@@ -27,7 +27,12 @@ except Exception:
 
 DetectorFactory.seed = 0
 
-QWEN_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+PRIMARY_CHAT_MODELS = [
+    "Qwen/Qwen2.5-72B-Instruct",
+    "meta-llama/Llama-3.1-8B-Instruct",
+    "deepseek-ai/DeepSeek-V3",
+    "Qwen/Qwen2.5-Coder-32B-Instruct",
+]
 BERT_EMOTION_MODEL_NAME = "bhadresh-savani/bert-base-go-emotion"
 
 LANGUAGE_NAMES = {
@@ -202,6 +207,8 @@ def process_employee_feedback(text: str) -> dict:
 CRISIS_KEYWORDS = [
     "suicide", "kill myself", "end my life", "want to die", "self harm",
     "self-harm", "hurt myself", "not worth living", "no reason to live",
+    "kill him", "kill her", "kill them", "kill my boss", "kill someone",
+    "murder", "harm others", "hurt someone", "attack someone",
 ]
 
 CRISIS_MESSAGE = (
@@ -232,36 +239,94 @@ def _contains_crisis_language(text: str) -> bool:
     return any(kw in lowered for kw in CRISIS_KEYWORDS)
 
 def _generate_wellness_fallback(user_text: str) -> str:
-    """Generate supportive context-aware responses if offline or API is unavailable."""
-    user_lower = user_text.lower()
-    if any(w in user_lower for w in ["sad", "depressed", "down", "unhappy", "cry", "lonely"]):
+    """Generate supportive, context-aware responses if offline or API is unavailable."""
+    user_lower = user_text.lower().strip()
+
+    # Calculate VADER sentiment score
+    compound = 0.0
+    try:
+        vader = _get_vader()
+        sentiment = vader.polarity_scores(user_text)
+        compound = sentiment.get("compound", 0.0)
+    except Exception:
+        pass
+
+    # Check for negation words
+    negation_words = {
+        "not", "no", "never", "hardly", "barely", "don't", "dont",
+        "didn't", "didnt", "cannot", "can't", "cant", "won't", "wont",
+        "isn't", "isnt", "aren't", "arent", "wasn't", "wasnt", "doesn't", "doesnt"
+    }
+    words = re.findall(r"\b\w+(?:'\w+)?\b", user_lower)
+    has_negation = any(w in negation_words for w in words)
+
+    sad_keywords = [
+        "sad", "depress", "down", "unhappy", "cry", "lonel", "hopeless",
+        "helpless", "worthless", "lost", "miserab", "grief", "pain",
+        "hurting", "empty", "alone", "heartbreak", "struggl", "not okay",
+        "not feeling good", "not good", "not well", "not feeling well",
+        "low", "gloomy", "demotivat"
+    ]
+    stress_keywords = [
+        "stress", "anxious", "overwhelm", "pressure", "burnout", "tired",
+        "exhaust", "drained", "panic", "worry", "worried", "nervous",
+        "tense", "overloaded", "hectic", "deadline"
+    ]
+    anger_keywords = [
+        "angry", "frustrat", "annoy", "mad", "irritat", "furious", "upset",
+        "hate", "resent", "unfair"
+    ]
+    positive_keywords = [
+        "happy", "great", "good", "excit", "awesome", "proud", "relie",
+        "joy", "wonderful", "fantastic", "amazing", "blessed", "peaceful", "cheerful"
+    ]
+
+    # 1. Hopelessness / Low mood / Sadness / Negated positive (e.g. "not feeling good", "not happy")
+    if (
+        any(k in user_lower for k in sad_keywords)
+        or (has_negation and any(k in user_lower for k in positive_keywords))
+        or (compound <= -0.25 and not any(k in user_lower for k in stress_keywords + anger_keywords))
+    ):
+        if any(h in user_lower for h in ["hopeless", "helpless", "worthless", "lost"]):
+            return (
+                "I hear how heavy and overwhelming things feel right now, and I want you to know you're not alone. "
+                "Please remember to take things one gentle breath at a time without pressuring yourself. "
+                "Would you like to talk about what has been weighing on you?"
+            )
         return (
-            "I hear you, and it's completely okay to have days where things feel heavy. "
-            "Take a slow breath and remember you don't have to carry it all at once. "
+            "I hear you, and it's completely okay to have days where you're not feeling your best or things feel heavy. "
+            "Take a slow breath and give yourself some space today. "
             "What's one small thing that might bring you a moment of comfort right now?"
         )
-    elif any(w in user_lower for w in ["stress", "anxious", "overwhelm", "pressure", "burnout", "tired", "exhaust"]):
+
+    # 2. Stress / Anxiety / Burnout / Overwhelm
+    if any(k in user_lower for k in stress_keywords) or (compound <= -0.1 and "work" in user_lower):
         return (
-            "It sounds like you've been carrying a heavy workload or pressure lately. "
-            "Please consider pausing for just a minute to step away from your screen or do a quick 4-7-8 breathing exercise. "
-            "Would you like to talk through what feels most urgent?"
+            "It sounds like you've been carrying a lot of pressure and tension lately. "
+            "Please consider pausing for just a minute to step away from your screen or try a 4-7-8 deep breathing exercise. "
+            "Would you like to talk through what feels most urgent right now?"
         )
-    elif any(w in user_lower for w in ["angry", "frustrat", "annoy", "mad", "irritat"]):
+
+    # 3. Frustration / Anger
+    if any(k in user_lower for k in anger_keywords):
         return (
             "That sounds really frustrating, and your feelings are completely valid. "
-            "It can help to take a short walk or write down your thoughts before responding to the situation. "
-            "I'm right here if you want to vent."
+            "Taking a quick walk, drinking some cold water, or jotting down your thoughts can help release some of that tension. "
+            "I'm right here if you'd like to vent."
         )
-    elif any(w in user_lower for w in ["happy", "great", "good", "excit", "awesome", "proud", "relie"]):
+
+    # 4. Genuine positive (only if NO negation and sentiment is positive)
+    if not has_negation and compound >= 0.05 and any(k in user_lower for k in positive_keywords):
         return (
-            "I'm so glad to hear that! Celebrating these positive moments and recognizing what went well is great for your well-being. "
+            "I'm so glad to hear that! Celebrating positive moments and recognizing what went well is wonderful for your well-being. "
             "What made today feel especially good?"
         )
-    else:
-        return (
-            "Thank you for sharing that with me. I'm here to listen and support you. "
-            "How has this been affecting your energy and peace of mind today?"
-        )
+
+    # 5. General / Open fallback
+    return (
+        "Thank you for sharing that with me. I'm here to listen and support you. "
+        "How has this been affecting your energy and peace of mind today?"
+    )
 
 def _get_hf_token() -> str:
     """Get HF token from Streamlit secrets or environment."""
@@ -274,22 +339,31 @@ def _get_hf_token() -> str:
         pass
     return os.environ.get("HF_TOKEN", "")
 
-def _qwen_api_reply(messages: list[dict]) -> str:
-    """Call the HuggingFace Inference API with a 10-second timeout."""
+def _hf_api_reply(messages: list[dict]) -> str:
+    """Call the HuggingFace Inference API trying supported serverless models with timeout."""
     hf_token = _get_hf_token()
-    client = InferenceClient(
-        model=QWEN_MODEL_NAME,
-        token=hf_token or None,
-        timeout=10,
-    )
-    response = client.chat_completion(
-        messages=messages,
-        max_tokens=150,
-        temperature=0.7,
-        top_p=0.9,
-    )
-    reply = response.choices[0].message.content.strip()
-    return reply
+
+    for model_name in PRIMARY_CHAT_MODELS:
+        try:
+            client = InferenceClient(
+                model=model_name,
+                token=hf_token or None,
+                timeout=8,
+            )
+            response = client.chat_completion(
+                messages=messages,
+                max_tokens=150,
+                temperature=0.7,
+                top_p=0.9,
+            )
+            reply = response.choices[0].message.content.strip()
+            if reply:
+                return reply
+        except Exception as e:
+            print(f"[WellnessChat] Model '{model_name}' attempt skipped: {e}")
+            continue
+
+    return ""
 
 def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict:
     if _contains_crisis_language(message):
@@ -301,15 +375,15 @@ def wellness_chat_reply(message: str, history: list[dict] | None = None) -> dict
             messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": message})
 
-    # 1. Primary: Hugging Face Serverless Inference API (0 MB local RAM, 0% CPU saturation)
+    # 1. Primary: Hugging Face Serverless Inference API with fallback across top models
     try:
-        reply = _qwen_api_reply(messages)
+        reply = _hf_api_reply(messages)
         if reply:
             return {"reply": reply, "flagged": False}
     except Exception as e:
         print(f"[WellnessChat] API note: {e}")
 
-    # 2. Fast, empathetic fallback (instant response, zero crashes or timeouts)
+    # 2. Fast, empathetic fallback (context-aware, negation-aware sentiment fallback)
     return {
         "reply": _generate_wellness_fallback(message),
         "flagged": False,
